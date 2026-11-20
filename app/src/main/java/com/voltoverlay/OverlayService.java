@@ -21,6 +21,7 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -34,7 +35,8 @@ import java.util.Locale;
 
 /**
  * Foreground service that maintains a click-through always-on-top battery voltage
- * and software fuel-gauge overlay, plus publishes live telemetry for MainActivity.
+ * and software fuel-gauge overlay, supports free movement, tracks battery runtime,
+ * and publishes stabilized telemetry to MainActivity.
  */
 public class OverlayService extends Service {
 
@@ -153,12 +155,15 @@ public class OverlayService extends Service {
 
     private int shownPct = -1;
 
-    // Session & runtime tracking (on-battery usage, screen-on time, estimated time remaining).
+    // Session & stabilized runtime tracking.
     private long batterySessionMs = 0L;
     private long screenOnSessionMs = 0L;
     private Boolean prevPluggedState = null;
     private double smoothDischargeMa = 450.0;
     private double smoothChargeMa = 1200.0;
+    private long stabilizedEstMs = -1L;
+    private boolean stabilizedEstIsCharge = false;
+    private long lastEstUpdateElapsedMs = 0L;
 
     // Clean cycle tracking (never learned from shutdowns).
     private boolean hadFullAnchor = false;
@@ -224,15 +229,18 @@ public class OverlayService extends Service {
         }
 
         if (intent != null && ACTION_MOVE.equals(intent.getAction())) {
+            userStop = false;
+            prefs.edit().putBoolean("user_stopped", false).apply();
             if (overlayView == null) {
                 createOverlayWindow();
             }
             setMoveMode(true);
             ensureForegroundStarted();
-            return userStop ? START_NOT_STICKY : START_STICKY;
+            return START_STICKY;
         }
 
         userStop = false;
+        prefs.edit().putBoolean("user_stopped", false).apply();
         ensureForegroundStarted();
         return START_STICKY;
     }
@@ -295,6 +303,7 @@ public class OverlayService extends Service {
         signLearned = prefs.getBoolean("sign_learned", false);
         int savedSign = prefs.getInt("sign_multiplier", 1);
         signMultiplier = (savedSign == -1) ? -1 : 1;
+        userStop = prefs.getBoolean("user_stopped", false);
 
         String curveCsv = prefs.getString("curve_pt", null);
         if (curveCsv != null && !curveCsv.trim().isEmpty()) {
@@ -417,7 +426,8 @@ public class OverlayService extends Service {
                 .putInt("sign_multiplier", signMultiplier)
                 .putFloat("typ_i", (float) typI)
                 .putLong("battery_session_ms", batterySessionMs)
-                .putLong("screen_on_session_ms", screenOnSessionMs);
+                .putLong("screen_on_session_ms", screenOnSessionMs)
+                .putBoolean("user_stopped", userStop);
 
         if (overlayParams != null) {
             editor.putInt("overlay_x", overlayParams.x);
@@ -453,12 +463,12 @@ public class OverlayService extends Service {
 
         BatterySnapshot snap = readBatterySnapshot();
 
-        // Track on-battery duration & screen-on duration cleanly.
         if (prevPluggedState != null && prevPluggedState != snap.plugged) {
             if (!snap.plugged) {
                 batterySessionMs = 0L;
                 screenOnSessionMs = 0L;
             }
+            stabilizedEstMs = -1L;
         }
         prevPluggedState = snap.plugged;
 
@@ -471,7 +481,6 @@ public class OverlayService extends Service {
             }
         }
 
-        // Update current sign learning & signed current (mA).
         double iMa = 0.0;
         boolean currentAvailable = false;
         if (snap.plugged && snap.status == BatteryManager.BATTERY_STATUS_FULL) {
@@ -506,7 +515,6 @@ public class OverlayService extends Service {
             }
         }
 
-        // Smooth voltage and current.
         if (!Double.isNaN(snap.voltageV)) {
             if (Double.isNaN(smoothV)) {
                 smoothV = snap.voltageV;
@@ -524,26 +532,23 @@ public class OverlayService extends Service {
             }
         }
 
-        // Update smoothed discharge/charge rates for remaining-time estimation.
+        // Slow rate smoothing so estimated remaining time stays calm instead of jumping.
         if (!snap.plugged && currentAvailable && iMa < -15.0) {
-            double instDischarge = clampDouble(Math.abs(iMa), 80.0, 5000.0);
-            smoothDischargeMa = smoothDischargeMa + 0.08 * (instDischarge - smoothDischargeMa);
+            double instDischarge = clampDouble(Math.abs(iMa), 80.0, 4500.0);
+            smoothDischargeMa = smoothDischargeMa + 0.025 * (instDischarge - smoothDischargeMa);
         } else if (snap.charging && currentAvailable && iMa > 25.0) {
-            double instCharge = clampDouble(iMa, 100.0, 6000.0);
-            smoothChargeMa = smoothChargeMa + 0.08 * (instCharge - smoothChargeMa);
+            double instCharge = clampDouble(iMa, 100.0, 5000.0);
+            smoothChargeMa = smoothChargeMa + 0.025 * (instCharge - smoothChargeMa);
         }
 
-        // Update long-run discharge current (typI) and empty point (emptyV).
         if (!snap.charging && currentAvailable && iMa < 0.0) {
             double dischargeMa = Math.abs(iMa);
             typI = clampDouble(typI + (1.0 / 900.0) * (dischargeMa - typI), 150.0, 900.0);
         }
         double emptyV = computeEmptyVoltage();
 
-        // Manage clean learning cycle state.
         updateCycleState(snap);
 
-        // Fuel gauge step: sleep gaps vs active tick, coulomb counting, and voltage correction.
         if (!currentAvailable && !hasCurrentReading) {
             double vRef = !Double.isNaN(smoothV) ? smoothV : 3.85;
             double pctEst = curvePercent(vRef, emptyV);
@@ -577,14 +582,12 @@ public class OverlayService extends Service {
             }
         }
 
-        // Check sleep gap invalidity threshold (> 40% of charge drawn was sleep-estimated).
         if (cycleActive && !cycleInvalidated && cycleDrawnMah > 0.0) {
             if (cycleSleepDrawnMah > 0.40 * cycleDrawnMah) {
                 cycleInvalidated = true;
             }
         }
 
-        // Voltage estimate & soft pull toward OCV curve when |smoothI| < 1000 mA.
         double vForOcv = !Double.isNaN(smoothV) ? smoothV : 3.85;
         double currentForOcv = hasCurrentReading ? smoothI : 0.0;
         double ocv = vForOcv - (currentForOcv / 1000.0) * INTERNAL_RESISTANCE_OHM;
@@ -598,7 +601,6 @@ public class OverlayService extends Service {
             remainingMah = remainingMah + k * (targetFromCurve - remainingMah);
         }
 
-        // Full anchor check.
         boolean fullAnchor = (snap.plugged && snap.status == BatteryManager.BATTERY_STATUS_FULL)
                 || (snap.charging && !Double.isNaN(smoothV) && smoothV >= 4.33
                 && (!hasCurrentReading || smoothI < 300.0));
@@ -615,7 +617,6 @@ public class OverlayService extends Service {
 
         remainingMah = clampDouble(remainingMah, 0.0, capacityMah);
 
-        // Record curve knots and capacity learning during a valid discharge cycle.
         if (cycleActive && !cycleInvalidated && !snap.plugged) {
             recordCurveKnots(ocv, emptyV);
             if (!cycleCapacityRecorded && ocv <= emptyV + 0.10 && cycleDrawnMah > 50.0) {
@@ -632,7 +633,6 @@ public class OverlayService extends Service {
             }
         }
 
-        // Compute displayed percent (moves at most 1 point per second toward target).
         int targetPct = (int) Math.round(clampDouble((remainingMah / capacityMah) * 100.0, 0.0, 100.0));
         if (shownPct < 0) {
             shownPct = targetPct;
@@ -642,40 +642,73 @@ public class OverlayService extends Service {
             shownPct = Math.max(targetPct, shownPct - 1);
         }
 
-        // Estimate remaining discharge or charge duration.
-        long estRemainingMs = -1L;
-        boolean estIsCharge = false;
-        if (snap.charging) {
-            estIsCharge = true;
-            double neededMah = Math.max(0.0, capacityMah - remainingMah);
-            double effChargeMa = (hasCurrentReading && smoothI > 25.0)
-                    ? smoothI * CHARGE_EFFICIENCY
-                    : smoothChargeMa * CHARGE_EFFICIENCY;
-            if (neededMah <= 1.0 || snap.full) {
-                estRemainingMs = 0L;
-            } else if (effChargeMa > 20.0) {
-                double hours = neededMah / effChargeMa;
-                estRemainingMs = Math.min((long) (hours * 3600.0 * 1000.0), 48L * 3600L * 1000L);
-            }
-        } else if (!snap.plugged) {
-            estIsCharge = false;
-            double rateMa = (hasCurrentReading && smoothI < -15.0)
-                    ? Math.abs(smoothI)
-                    : Math.max(typI, smoothDischargeMa);
-            if (rateMa > 20.0 && remainingMah > 0.0) {
-                double hours = remainingMah / rateMa;
-                estRemainingMs = Math.min((long) (hours * 3600.0 * 1000.0), 96L * 3600L * 1000L);
-            }
-        }
+        // Compute stabilized estimate every >= 5s with a 6-minute deadband so it doesn't jump around.
+        updateStabilizedEstimate(snap, nowElapsedMs);
 
-        // Persistence every 30s (or every 5s when <= 15%).
         long saveIntervalMs = (shownPct <= 15) ? SAVE_LOW_MS : SAVE_NORMAL_MS;
         if (nowWallMs - lastSaveWallMs >= saveIntervalMs) {
             saveStateToPrefs(nowWallMs, false);
         }
 
         updateOverlayTextAndColor(shownPct, snap.plugged);
-        publishTelemetry(snap, ocv, emptyV, estRemainingMs, estIsCharge);
+        publishTelemetry(snap, ocv, emptyV, stabilizedEstMs, stabilizedEstIsCharge);
+    }
+
+    private void updateStabilizedEstimate(BatterySnapshot snap, long nowElapsedMs) {
+        long rawEstMs = -1L;
+        boolean isCharge = false;
+
+        if (snap.charging) {
+            isCharge = true;
+            double neededMah = Math.max(0.0, capacityMah - remainingMah);
+            double chargeRateMa = hasCurrentReading
+                    ? (0.7 * smoothChargeMa + 0.3 * Math.max(100.0, smoothI))
+                    : Math.max(400.0, smoothChargeMa);
+            double effChargeMa = chargeRateMa * CHARGE_EFFICIENCY;
+            if (neededMah <= 1.0 || snap.full) {
+                rawEstMs = 0L;
+            } else if (effChargeMa > 25.0) {
+                double hours = neededMah / effChargeMa;
+                rawEstMs = Math.min((long) (hours * 3600.0 * 1000.0), 48L * 3600L * 1000L);
+            }
+        } else if (!snap.plugged) {
+            isCharge = false;
+            double blendedDischargeMa = hasCurrentReading
+                    ? (0.65 * smoothDischargeMa + 0.35 * typI)
+                    : Math.max(200.0, typI);
+            blendedDischargeMa = clampDouble(blendedDischargeMa, 120.0, 3500.0);
+            if (remainingMah > 0.0) {
+                double hours = remainingMah / blendedDischargeMa;
+                rawEstMs = Math.min((long) (hours * 3600.0 * 1000.0), 96L * 3600L * 1000L);
+            }
+        }
+
+        if (rawEstMs < 0L) {
+            stabilizedEstMs = -1L;
+            stabilizedEstIsCharge = isCharge;
+            return;
+        }
+
+        if (stabilizedEstMs < 0L || stabilizedEstIsCharge != isCharge) {
+            stabilizedEstMs = rawEstMs;
+            stabilizedEstIsCharge = isCharge;
+            lastEstUpdateElapsedMs = nowElapsedMs;
+            return;
+        }
+
+        if (nowElapsedMs - lastEstUpdateElapsedMs >= 5000L) {
+            long diffMs = Math.abs(rawEstMs - stabilizedEstMs);
+            long deadbandMs = 6L * 60L * 1000L;
+            if (diffMs > deadbandMs) {
+                stabilizedEstMs = stabilizedEstMs + (long) (0.20 * (rawEstMs - stabilizedEstMs));
+                lastEstUpdateElapsedMs = nowElapsedMs;
+            } else {
+                // Smoothly count down in real time if estimate is within the deadband.
+                long dt = Math.max(0L, nowElapsedMs - lastEstUpdateElapsedMs);
+                stabilizedEstMs = Math.max(0L, stabilizedEstMs - dt);
+                lastEstUpdateElapsedMs = nowElapsedMs;
+            }
+        }
     }
 
     private void publishTelemetry(
@@ -1004,6 +1037,10 @@ public class OverlayService extends Service {
                 int rawX = Math.round(event.getRawX());
                 int rawY = Math.round(event.getRawY());
 
+                DisplayMetrics dm = getResources().getDisplayMetrics();
+                int maxX = Math.max(0, dm.widthPixels - Math.max(v.getWidth(), dp(64)));
+                int maxY = Math.max(0, dm.heightPixels - Math.max(v.getHeight(), dp(32)));
+
                 if (action == MotionEvent.ACTION_DOWN) {
                     isDragging = true;
                     touchStartRawX = rawX;
@@ -1012,13 +1049,14 @@ public class OverlayService extends Service {
                     touchStartParamY = overlayParams.y;
                     return true;
                 } else if (action == MotionEvent.ACTION_MOVE && isDragging) {
-                    overlayParams.x = Math.max(0, touchStartParamX + (rawX - touchStartRawX));
-                    overlayParams.y = Math.max(0, touchStartParamY + (rawY - touchStartRawY));
+                    int nextX = touchStartParamX + (rawX - touchStartRawX);
+                    int nextY = touchStartParamY + (rawY - touchStartRawY);
+                    overlayParams.x = clampInt(nextX, 0, maxX);
+                    overlayParams.y = clampInt(nextY, 0, maxY);
                     try {
                         windowManager.updateViewLayout(overlayView, overlayParams);
                     } catch (Throwable ignored) {
                     }
-                    saveOverlayPosition();
                     return true;
                 } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                     if (isDragging) {
@@ -1193,6 +1231,10 @@ public class OverlayService extends Service {
             return max;
         }
         return val;
+    }
+
+    private static int clampInt(int val, int min, int max) {
+        return Math.max(min, Math.min(max, val));
     }
 
     public static final class LatestTelemetry {

@@ -7,6 +7,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Canvas;
 import android.graphics.Insets;
 import android.graphics.Paint;
@@ -33,28 +34,83 @@ import android.widget.Toast;
 import java.util.Locale;
 
 /**
- * Battery Guru-inspired telemetry dashboard built programmatically in pure Java.
+ * Battery Guru-inspired telemetry dashboard supporting Light and Dark themes,
+ * auto-start after reboot, and free overlay positioning.
  */
 public class MainActivity extends Activity {
 
     private static final int REQ_POST_NOTIFICATIONS = 101;
     private static final int MAX_HISTORY_SAMPLES = 90;
 
-    private static final int COLOR_BG_PAGE = 0xFFF1F5F9;
-    private static final int COLOR_CARD_BG = 0xFFFFFFFF;
-    private static final int COLOR_CARD_BORDER = 0xFFE2E8F0;
-    private static final int COLOR_TEXT_PRIMARY = 0xFF0F172A;
-    private static final int COLOR_TEXT_SECONDARY = 0xFF475569;
-    private static final int COLOR_ACCENT_BLUE = 0xFF0284C7;
-    private static final int COLOR_ACCENT_GREEN = 0xFF15803D;
-    private static final int COLOR_ACCENT_AMBER = 0xFFB45309;
-    private static final int COLOR_ACCENT_RED = 0xFFC62828;
-    private static final int COLOR_TRACK_BG = 0xFFE2E8F0;
+    private static final class ThemePalette {
+        final boolean dark;
+        final int pageBg;
+        final int cardBg;
+        final int cardBorder;
+        final int textPrimary;
+        final int textSecondary;
+        final int accentBlue;
+        final int accentGreen;
+        final int accentAmber;
+        final int accentRed;
+        final int trackBg;
+        final int chartBg;
+        final int chartGrid;
+        final int btnBg;
+        final int btnBorder;
+
+        ThemePalette(boolean isDark) {
+            this.dark = isDark;
+            if (isDark) {
+                this.pageBg = 0xFF0B1120;
+                this.cardBg = 0xFF111827;
+                this.cardBorder = 0xFF1E293B;
+                this.textPrimary = 0xFFF8FAFC;
+                this.textSecondary = 0xFF94A3B8;
+                this.accentBlue = 0xFF38BDF8;
+                this.accentGreen = 0xFF4ADE80;
+                this.accentAmber = 0xFFFBBF24;
+                this.accentRed = 0xFFF87171;
+                this.trackBg = 0xFF1E293B;
+                this.chartBg = 0xFF0F172A;
+                this.chartGrid = 0xFF1E293B;
+                this.btnBg = 0xFF1E293B;
+                this.btnBorder = 0xFF334155;
+            } else {
+                this.pageBg = 0xFFF1F5F9;
+                this.cardBg = 0xFFFFFFFF;
+                this.cardBorder = 0xFFE2E8F0;
+                this.textPrimary = 0xFF0F172A;
+                this.textSecondary = 0xFF475569;
+                this.accentBlue = 0xFF0284C7;
+                this.accentGreen = 0xFF15803D;
+                this.accentAmber = 0xFFB45309;
+                this.accentRed = 0xFFC62828;
+                this.trackBg = 0xFFE2E8F0;
+                this.chartBg = 0xFFF8FAFC;
+                this.chartGrid = 0xFFE2E8F0;
+                this.btnBg = 0xFFE2E8F0;
+                this.btnBorder = 0xFFCBD5E1;
+            }
+        }
+    }
 
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final double[] voltageHistory = new double[MAX_HISTORY_SAMPLES];
     private final double[] currentHistory = new double[MAX_HISTORY_SAMPLES];
     private int historyCount = 0;
+
+    private ThemePalette palette;
+    private ScrollView scrollView;
+    private LinearLayout root;
+    private TextView titleView;
+    private TextView subtitleView;
+
+    private LinearLayout heroCard;
+    private LinearLayout usageCard;
+    private LinearLayout healthCard;
+    private LinearLayout liveCard;
+    private LinearLayout ctrlCard;
 
     private TextView heroPctText;
     private TextView heroStateBadge;
@@ -74,8 +130,15 @@ public class MainActivity extends Activity {
     private TextView tempValue;
     private TextView ocvEmptyValue;
     private TextView gaugeEngineValue;
+    private TextView chartCaption;
+
+    private Button allowOverlayBtn;
+    private Button startOverlayBtn;
+    private Button moveOverlayBtn;
+    private Button stopOverlayBtn;
 
     private TelemetrySparklineView sparklineView;
+    private OverlayService.LatestTelemetry lastRendered = OverlayService.latestTelemetry;
 
     private final BroadcastReceiver telemetryReceiver = new BroadcastReceiver() {
         @Override
@@ -84,6 +147,7 @@ public class MainActivity extends Activity {
                 return;
             }
             OverlayService.LatestTelemetry t = telemetryFromIntent(intent);
+            lastRendered = t;
             renderTelemetry(t);
         }
     };
@@ -91,7 +155,8 @@ public class MainActivity extends Activity {
     private final Runnable fallbackPollRunnable = new Runnable() {
         @Override
         public void run() {
-            renderTelemetry(OverlayService.latestTelemetry);
+            lastRendered = OverlayService.latestTelemetry;
+            renderTelemetry(lastRendered);
             uiHandler.postDelayed(this, 1000L);
         }
     };
@@ -105,14 +170,35 @@ public class MainActivity extends Activity {
             currentHistory[i] = Double.NaN;
         }
 
+        palette = new ThemePalette(isSystemDarkMode());
+        buildUi();
+        applyPalette();
+        renderTelemetry(lastRendered);
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        palette = new ThemePalette((newConfig.uiMode & Configuration.UI_MODE_NIGHT_MASK)
+                == Configuration.UI_MODE_NIGHT_YES);
+        applyPalette();
+        renderTelemetry(lastRendered);
+    }
+
+    private boolean isSystemDarkMode() {
+        int nightMode = getResources().getConfiguration().uiMode
+                & Configuration.UI_MODE_NIGHT_MASK;
+        return nightMode == Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    private void buildUi() {
         final int padBase = dp(14);
         final int gapMed = dp(10);
 
-        ScrollView scrollView = new ScrollView(this);
+        scrollView = new ScrollView(this);
         scrollView.setFillViewport(true);
-        scrollView.setBackgroundColor(COLOR_BG_PAGE);
 
-        final LinearLayout root = new LinearLayout(this);
+        root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(padBase, padBase, padBase, padBase);
         scrollView.addView(root);
@@ -133,30 +219,25 @@ public class MainActivity extends Activity {
             }
         });
 
-        // Header title & subtitle
-        TextView titleView = new TextView(this);
+        titleView = new TextView(this);
         titleView.setText("Volt Overlay");
-        titleView.setTextColor(COLOR_TEXT_PRIMARY);
         titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f);
         titleView.setTypeface(Typeface.SANS_SERIF, Typeface.BOLD);
         root.addView(titleView);
 
-        TextView subtitleView = new TextView(this);
-        subtitleView.setText("Fuel-gauge telemetry · Redmi A5 4G (5100 mAh rated / 5200 mAh typical)");
-        subtitleView.setTextColor(COLOR_TEXT_SECONDARY);
+        subtitleView = new TextView(this);
+        subtitleView.setText("Fuel-gauge telemetry · Auto-starts on boot · Light/Dark aware");
         subtitleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
         subtitleView.setPadding(0, dp(2), 0, gapMed);
         root.addView(subtitleView);
 
-        // 1. Hero Battery & Fuel-Gauge Card
-        LinearLayout heroCard = createCard(dp(14));
+        heroCard = createCard(dp(14));
         LinearLayout heroTopRow = new LinearLayout(this);
         heroTopRow.setOrientation(LinearLayout.HORIZONTAL);
         heroTopRow.setGravity(Gravity.CENTER_VERTICAL);
 
         heroPctText = new TextView(this);
         heroPctText.setText("~--%");
-        heroPctText.setTextColor(COLOR_TEXT_PRIMARY);
         heroPctText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 34f);
         heroPctText.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         LinearLayout.LayoutParams pctLp = new LinearLayout.LayoutParams(
@@ -166,86 +247,66 @@ public class MainActivity extends Activity {
 
         heroStateBadge = new TextView(this);
         heroStateBadge.setText("ON BATTERY");
-        heroStateBadge.setTextColor(COLOR_TEXT_PRIMARY);
         heroStateBadge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
         heroStateBadge.setTypeface(Typeface.SANS_SERIF, Typeface.BOLD);
-        int badgePadH = dp(10);
-        int badgePadV = dp(5);
-        heroStateBadge.setPadding(badgePadH, badgePadV, badgePadH, badgePadV);
+        heroStateBadge.setPadding(dp(10), dp(5), dp(10), dp(5));
         GradientDrawable badgeBg = new GradientDrawable();
-        badgeBg.setColor(COLOR_TRACK_BG);
         badgeBg.setCornerRadius(dp(999));
         heroStateBadge.setBackground(badgeBg);
         heroTopRow.addView(heroStateBadge);
         heroCard.addView(heroTopRow);
 
         heroEstimateText = new TextView(this);
-        heroEstimateText.setText("Waiting for service telemetry...");
-        heroEstimateText.setTextColor(COLOR_TEXT_SECONDARY);
+        heroEstimateText.setText("Stabilizing runtime estimate...");
         heroEstimateText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
         heroEstimateText.setPadding(0, dp(6), 0, dp(10));
         heroCard.addView(heroEstimateText);
 
         chargeGaugeBar = new GaugeBarView(this);
-        LinearLayout.LayoutParams gaugeLp = new LinearLayout.LayoutParams(
+        heroCard.addView(chargeGaugeBar, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(14)
-        );
-        heroCard.addView(chargeGaugeBar, gaugeLp);
-
+        ));
         addCardWithSpacing(root, heroCard, gapMed);
 
-        // 2. Usage & Time Remaining Grid Card
-        LinearLayout usageCard = createCard(dp(12));
+        usageCard = createCard(dp(12));
         usageCard.addView(createSectionHeader("USAGE & TIME ESTIMATES"));
-
         onBatteryTimeValue = addMetricRow(usageCard, "On battery time", "--");
         screenOnTimeValue = addMetricRow(usageCard, "Screen-on time (battery)", "--");
         estRemainingValue = addMetricRow(usageCard, "Estimated remaining", "--");
-
         addCardWithSpacing(root, usageCard, gapMed);
 
-        // 3. Battery Health & Fuel Gauge Card
-        LinearLayout healthCard = createCard(dp(12));
+        healthCard = createCard(dp(12));
         healthCard.addView(createSectionHeader("BATTERY HEALTH & FUEL GAUGE"));
-
         healthPctValue = addMetricRow(healthCard, "Estimated health (vs 5100 mAh)", "--");
         learnedCapValue = addMetricRow(healthCard, "Fuel gauge capacity / rem.", "--");
         cyclesValue = addMetricRow(healthCard, "Learned clean cycles", "0");
         ocvEmptyValue = addMetricRow(healthCard, "OCV / 0% empty point", "--");
         gaugeEngineValue = addMetricRow(healthCard, "Cycle & sign state", "--");
-
         addCardWithSpacing(root, healthCard, gapMed);
 
-        // 4. Live Electrical & Thermal Card
-        LinearLayout liveCard = createCard(dp(12));
+        liveCard = createCard(dp(12));
         liveCard.addView(createSectionHeader("LIVE ELECTRICAL & THERMAL"));
-
         voltageValue = addMetricRow(liveCard, "Smoothed voltage", "-.-V");
         currentValue = addMetricRow(liveCard, "Current (+in / -out)", "--");
         powerValue = addMetricRow(liveCard, "Instantaneous power", "--");
         tempValue = addMetricRow(liveCard, "Battery temperature", "--");
 
-        TextView chartCaption = new TextView(this);
+        chartCaption = new TextView(this);
         chartCaption.setText("Recent history: Voltage (blue) & Current (amber)");
-        chartCaption.setTextColor(COLOR_TEXT_SECONDARY);
         chartCaption.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
         chartCaption.setPadding(0, dp(10), 0, dp(6));
         liveCard.addView(chartCaption);
 
         sparklineView = new TelemetrySparklineView(this);
-        LinearLayout.LayoutParams sparkLp = new LinearLayout.LayoutParams(
+        liveCard.addView(sparklineView, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(96)
-        );
-        liveCard.addView(sparklineView, sparkLp);
-
+        ));
         addCardWithSpacing(root, liveCard, gapMed);
 
-        // 5. Controls Card
-        LinearLayout ctrlCard = createCard(dp(12));
+        ctrlCard = createCard(dp(12));
         ctrlCard.addView(createSectionHeader("OVERLAY CONTROLS"));
 
-        Button allowOverlayBtn = new Button(this);
-        allowOverlayBtn.setText("1. Allow display over other apps");
+        allowOverlayBtn = createActionButton("1. Allow display over other apps");
         allowOverlayBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -257,8 +318,7 @@ public class MainActivity extends Activity {
             }
         });
 
-        Button startOverlayBtn = new Button(this);
-        startOverlayBtn.setText("2. Start overlay");
+        startOverlayBtn = createActionButton("2. Start overlay");
         startOverlayBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -280,14 +340,33 @@ public class MainActivity extends Activity {
                 uiHandler.postDelayed(new Runnable() {
                     @Override
                     public void run() {
-                        renderTelemetry(OverlayService.latestTelemetry);
+                        lastRendered = OverlayService.latestTelemetry;
+                        renderTelemetry(lastRendered);
                     }
                 }, 250L);
             }
         });
 
-        Button stopOverlayBtn = new Button(this);
-        stopOverlayBtn.setText("Stop overlay");
+        moveOverlayBtn = createActionButton("Move overlay (10s drag)");
+        moveOverlayBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (!Settings.canDrawOverlays(MainActivity.this)) {
+                    Toast.makeText(MainActivity.this, "Do step 1 first", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                Intent moveIntent = new Intent(MainActivity.this, OverlayService.class);
+                moveIntent.setAction(OverlayService.ACTION_MOVE);
+                startForegroundService(moveIntent);
+                Toast.makeText(
+                        MainActivity.this,
+                        "Drag overlay anywhere for 10 seconds",
+                        Toast.LENGTH_SHORT
+                ).show();
+            }
+        });
+
+        stopOverlayBtn = createActionButton("Stop overlay");
         stopOverlayBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -303,14 +382,108 @@ public class MainActivity extends Activity {
         btnLp.bottomMargin = dp(8);
         ctrlCard.addView(allowOverlayBtn, new LinearLayout.LayoutParams(btnLp));
         ctrlCard.addView(startOverlayBtn, new LinearLayout.LayoutParams(btnLp));
+        ctrlCard.addView(moveOverlayBtn, new LinearLayout.LayoutParams(btnLp));
         ctrlCard.addView(stopOverlayBtn, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
         ));
 
         root.addView(ctrlCard);
-
         setContentView(scrollView);
-        renderTelemetry(OverlayService.latestTelemetry);
+    }
+
+    private void applyPalette() {
+        scrollView.setBackgroundColor(palette.pageBg);
+        titleView.setTextColor(palette.textPrimary);
+        subtitleView.setTextColor(palette.textSecondary);
+        heroPctText.setTextColor(palette.textPrimary);
+        heroEstimateText.setTextColor(palette.textSecondary);
+        chartCaption.setTextColor(palette.textSecondary);
+
+        styleCard(heroCard, dp(14));
+        styleCard(usageCard, dp(12));
+        styleCard(healthCard, dp(12));
+        styleCard(liveCard, dp(12));
+        styleCard(ctrlCard, dp(12));
+
+        styleSectionHeaders(usageCard);
+        styleSectionHeaders(healthCard);
+        styleSectionHeaders(liveCard);
+        styleSectionHeaders(ctrlCard);
+
+        styleMetricRows(usageCard);
+        styleMetricRows(healthCard);
+        styleMetricRows(liveCard);
+
+        styleButton(allowOverlayBtn);
+        styleButton(startOverlayBtn);
+        styleButton(moveOverlayBtn);
+        styleButton(stopOverlayBtn);
+
+        sparklineView.applyColors(palette.chartBg, palette.chartGrid, palette.accentBlue, palette.accentAmber);
+    }
+
+    private void styleCard(LinearLayout card, int radiusDp) {
+        if (card == null) {
+            return;
+        }
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(palette.cardBg);
+        bg.setCornerRadius(radiusDp);
+        bg.setStroke(dp(1), palette.cardBorder);
+        card.setBackground(bg);
+    }
+
+    private void styleSectionHeaders(LinearLayout card) {
+        for (int i = 0; i < card.getChildCount(); i++) {
+            View child = card.getChildAt(i);
+            if (child instanceof TextView && child != chartCaption) {
+                TextView tv = (TextView) child;
+                String s = tv.getText().toString();
+                if (s.equals(s.toUpperCase(Locale.US)) && s.length() > 4) {
+                    tv.setTextColor(palette.accentBlue);
+                }
+            }
+        }
+    }
+
+    private void styleMetricRows(LinearLayout card) {
+        for (int i = 0; i < card.getChildCount(); i++) {
+            View child = card.getChildAt(i);
+            if (child instanceof LinearLayout) {
+                LinearLayout row = (LinearLayout) child;
+                if (row.getChildCount() >= 2) {
+                    View left = row.getChildAt(0);
+                    View right = row.getChildAt(1);
+                    if (left instanceof TextView) {
+                        ((TextView) left).setTextColor(palette.textSecondary);
+                    }
+                    if (right instanceof TextView) {
+                        ((TextView) right).setTextColor(palette.textPrimary);
+                    }
+                }
+            }
+        }
+    }
+
+    private void styleButton(Button btn) {
+        if (btn == null) {
+            return;
+        }
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(palette.btnBg);
+        bg.setCornerRadius(dp(8));
+        bg.setStroke(dp(1), palette.btnBorder);
+        btn.setBackground(bg);
+        btn.setTextColor(palette.textPrimary);
+    }
+
+    private Button createActionButton(String label) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+        b.setPadding(dp(12), dp(10), dp(12), dp(10));
+        return b;
     }
 
     @Override
@@ -322,7 +495,8 @@ public class MainActivity extends Activity {
         } else {
             registerReceiver(telemetryReceiver, filter);
         }
-        renderTelemetry(OverlayService.latestTelemetry);
+        lastRendered = OverlayService.latestTelemetry;
+        renderTelemetry(lastRendered);
         uiHandler.removeCallbacks(fallbackPollRunnable);
         uiHandler.postDelayed(fallbackPollRunnable, 1000L);
     }
@@ -354,35 +528,37 @@ public class MainActivity extends Activity {
 
         String stateLabel;
         int badgeColor;
+        int badgeTextColor;
         if (t.full) {
             stateLabel = "FULL";
-            badgeColor = 0xFFDCFCE7;
-            heroStateBadge.setTextColor(COLOR_ACCENT_GREEN);
+            badgeColor = palette.dark ? 0xFF14532D : 0xFFDCFCE7;
+            badgeTextColor = palette.accentGreen;
         } else if (t.charging) {
             stateLabel = "CHARGING ⚡";
-            badgeColor = 0xFFE0F2FE;
-            heroStateBadge.setTextColor(COLOR_ACCENT_BLUE);
+            badgeColor = palette.dark ? 0xFF0C4A6E : 0xFFE0F2FE;
+            badgeTextColor = palette.accentBlue;
         } else if (t.plugged) {
             stateLabel = "PLUGGED";
-            badgeColor = 0xFFFEF3C7;
-            heroStateBadge.setTextColor(COLOR_ACCENT_AMBER);
+            badgeColor = palette.dark ? 0xFF451A03 : 0xFFFEF3C7;
+            badgeTextColor = palette.accentAmber;
         } else if (pct <= 15) {
             stateLabel = "LOW BATTERY";
-            badgeColor = 0xFFFEE2E2;
-            heroStateBadge.setTextColor(COLOR_ACCENT_RED);
+            badgeColor = palette.dark ? 0xFF450A0A : 0xFFFEE2E2;
+            badgeTextColor = palette.accentRed;
         } else {
             stateLabel = "ON BATTERY";
-            badgeColor = 0xFFE2E8F0;
-            heroStateBadge.setTextColor(COLOR_TEXT_PRIMARY);
+            badgeColor = palette.trackBg;
+            badgeTextColor = palette.textPrimary;
         }
         heroStateBadge.setText(stateLabel);
+        heroStateBadge.setTextColor(badgeTextColor);
         if (heroStateBadge.getBackground() instanceof GradientDrawable) {
             ((GradientDrawable) heroStateBadge.getBackground()).setColor(badgeColor);
         }
 
         String estText;
         if (t.estRemainingMs < 0L) {
-            estText = "Estimating remaining time from live current...";
+            estText = "Stabilizing runtime estimate...";
         } else if (t.estIsCharge) {
             estText = "Est. time to full: " + formatDurationShort(t.estRemainingMs);
         } else {
@@ -391,9 +567,10 @@ public class MainActivity extends Activity {
         heroEstimateText.setText(estText);
 
         int barColor = (!t.plugged && pct <= 15)
-                ? COLOR_ACCENT_RED
-                : (t.charging ? COLOR_ACCENT_BLUE : COLOR_ACCENT_GREEN);
-        chargeGaugeBar.setPercent(pct, barColor);
+                ? palette.accentRed
+                : (t.charging ? palette.accentBlue : palette.accentGreen);
+        chargeGaugeBar.setColors(palette.trackBg, barColor);
+        chargeGaugeBar.setPercent(pct);
 
         if (t.plugged) {
             onBatteryTimeValue.setText("Plugged in (0m)");
@@ -405,7 +582,7 @@ public class MainActivity extends Activity {
 
         estRemainingValue.setText(
                 t.estRemainingMs < 0L
-                        ? "Calculating..."
+                        ? "Stabilizing..."
                         : ((t.estIsCharge ? "Full in " : "Left ~") + formatDurationShort(t.estRemainingMs))
         );
 
@@ -490,11 +667,6 @@ public class MainActivity extends Activity {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(paddingPx, paddingPx, paddingPx, paddingPx);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(COLOR_CARD_BG);
-        bg.setCornerRadius(dp(12));
-        bg.setStroke(dp(1), COLOR_CARD_BORDER);
-        card.setBackground(bg);
         return card;
     }
 
@@ -509,7 +681,6 @@ public class MainActivity extends Activity {
     private TextView createSectionHeader(String title) {
         TextView tv = new TextView(this);
         tv.setText(title);
-        tv.setTextColor(COLOR_ACCENT_BLUE);
         tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
         tv.setTypeface(Typeface.SANS_SERIF, Typeface.BOLD);
         tv.setPadding(0, 0, 0, dp(8));
@@ -524,7 +695,6 @@ public class MainActivity extends Activity {
 
         TextView labelView = new TextView(this);
         labelView.setText(label);
-        labelView.setTextColor(COLOR_TEXT_SECONDARY);
         labelView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
         LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
@@ -533,7 +703,6 @@ public class MainActivity extends Activity {
 
         TextView valView = new TextView(this);
         valView.setText(initialValue);
-        valView.setTextColor(COLOR_TEXT_PRIMARY);
         valView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
         valView.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         valView.setGravity(Gravity.END);
@@ -572,13 +741,18 @@ public class MainActivity extends Activity {
 
         GaugeBarView(Context context) {
             super(context);
-            trackPaint.setColor(COLOR_TRACK_BG);
-            fillPaint.setColor(COLOR_ACCENT_GREEN);
+            trackPaint.setColor(0xFFE2E8F0);
+            fillPaint.setColor(0xFF15803D);
         }
 
-        void setPercent(int pct, int color) {
+        void setColors(int trackColor, int fillColor) {
+            this.trackPaint.setColor(trackColor);
+            this.fillPaint.setColor(fillColor);
+            invalidate();
+        }
+
+        void setPercent(int pct) {
             this.percent = clampInt(pct, 0, 100);
-            this.fillPaint.setColor(color);
             invalidate();
         }
 
@@ -617,13 +791,21 @@ public class MainActivity extends Activity {
             gridPaint.setColor(0xFFE2E8F0);
             gridPaint.setStrokeWidth(1f);
 
-            voltPaint.setColor(COLOR_ACCENT_BLUE);
+            voltPaint.setColor(0xFF0284C7);
             voltPaint.setStyle(Paint.Style.STROKE);
             voltPaint.setStrokeWidth(3f);
 
-            currPaint.setColor(COLOR_ACCENT_AMBER);
+            currPaint.setColor(0xFFB45309);
             currPaint.setStyle(Paint.Style.STROKE);
             currPaint.setStrokeWidth(2.5f);
+        }
+
+        void applyColors(int bgColor, int gridColor, int voltColor, int currColor) {
+            bgPaint.setColor(bgColor);
+            gridPaint.setColor(gridColor);
+            voltPaint.setColor(voltColor);
+            currPaint.setColor(currColor);
+            invalidate();
         }
 
         void setSeries(double[] vArr, double[] iArr, int n) {
