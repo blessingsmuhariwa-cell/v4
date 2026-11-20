@@ -226,7 +226,7 @@ public class MainActivity extends Activity {
         root.addView(titleView);
 
         subtitleView = new TextView(this);
-        subtitleView.setText("Fuel-gauge telemetry · Auto-starts on boot · Light/Dark aware");
+        subtitleView.setText("Battery fuel-gauge telemetry · Auto-starts on boot");
         subtitleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
         subtitleView.setPadding(0, dp(2), 0, gapMed);
         root.addView(subtitleView);
