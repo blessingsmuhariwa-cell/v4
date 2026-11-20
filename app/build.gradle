@@ -1,0 +1,34 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.voltoverlay"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.voltoverlay"
+        minSdk 33
+        targetSdk 35
+        versionCode 3
+        versionName "2.1"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // Zero third-party or AndroidX dependencies.
+}
