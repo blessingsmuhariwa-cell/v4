@@ -277,8 +277,8 @@ public class MainActivity extends Activity {
 
         healthCard = createCard(dp(12));
         healthCard.addView(createSectionHeader("BATTERY HEALTH & FUEL GAUGE"));
-        healthPctValue = addMetricRow(healthCard, "Estimated health (vs 5100 mAh)", "--");
-        learnedCapValue = addMetricRow(healthCard, "Fuel gauge capacity / rem.", "--");
+        healthPctValue = addMetricRow(healthCard, "Estimated health (vs 5060 mAh)", "--");
+        learnedCapValue = addMetricRow(healthCard, "Remaining / capacity", "--");
         cyclesValue = addMetricRow(healthCard, "Learned clean cycles", "0");
         ocvEmptyValue = addMetricRow(healthCard, "OCV / 0% empty point", "--");
         gaugeEngineValue = addMetricRow(healthCard, "Cycle & sign state", "--");
@@ -644,11 +644,11 @@ public class MainActivity extends Activity {
         t.full = intent.getBooleanExtra(OverlayService.EXTRA_FULL, false);
         t.status = intent.getIntExtra(OverlayService.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN);
         t.shownPct = intent.getIntExtra(OverlayService.EXTRA_SHOWN_PCT, 0);
-        t.remainingMah = intent.getDoubleExtra(OverlayService.EXTRA_REMAINING_MAH, 4900.0);
-        t.capacityMah = intent.getDoubleExtra(OverlayService.EXTRA_CAPACITY_MAH, 4900.0);
-        t.ratedMah = intent.getDoubleExtra(OverlayService.EXTRA_RATED_MAH, 5100.0);
-        t.typicalMah = intent.getDoubleExtra(OverlayService.EXTRA_TYPICAL_MAH, 5200.0);
-        t.healthPct = intent.getDoubleExtra(OverlayService.EXTRA_HEALTH_PCT, 96.1);
+        t.remainingMah = intent.getDoubleExtra(OverlayService.EXTRA_REMAINING_MAH, 5060.0);
+        t.capacityMah = intent.getDoubleExtra(OverlayService.EXTRA_CAPACITY_MAH, 5060.0);
+        t.ratedMah = intent.getDoubleExtra(OverlayService.EXTRA_RATED_MAH, 5060.0);
+        t.typicalMah = intent.getDoubleExtra(OverlayService.EXTRA_TYPICAL_MAH, 5160.0);
+        t.healthPct = intent.getDoubleExtra(OverlayService.EXTRA_HEALTH_PCT, 100.0);
         t.cycleCount = intent.getIntExtra(OverlayService.EXTRA_CYCLE_COUNT, 0);
         t.batterySessionMs = intent.getLongExtra(OverlayService.EXTRA_BATTERY_SESSION_MS, 0L);
         t.screenOnSessionMs = intent.getLongExtra(OverlayService.EXTRA_SCREEN_ON_SESSION_MS, 0L);
